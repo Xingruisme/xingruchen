@@ -1,10 +1,417 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <title>My Personal Website</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子动态名字 - Xingru Chen</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Three.js 库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            background-color: #000000;
+            cursor: default;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #info-card {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #ffffff;
+            padding: 10px 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 255, 255, 0.2);
+            font-size: 14px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.95);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #ffffff;
+            font-size: 1.5rem;
+            z-index: 100;
+            transition: opacity 1.5s;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #00FFFF;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
 </head>
 <body>
-  <h1>Hello! Welcome to my website!</h1>
+    <!-- 离屏 Canvas 用于文字生成，不显示在页面上 -->
+    <canvas id="textCanvas" style="display: none;"></canvas>
+
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <p>正在生成粒子文字... 请稍候</p>
+    </div>
+
+    <div id="info-card">
+        <p>姓名: Xingru Chen</p>
+        <p>粒子数: 300,000</p>
+        <p>交互提示:</p>
+        <ul style="padding-left: 20px;">
+            <li>鼠标移动: 粒子像水面一样被推开 (消散)</li>
+            <li>鼠标左击: 粒子爆炸并重新聚拢 (聚拢)</li>
+        </ul>
+    </div>
+
+    <script>
+        // --- Three.js 全局变量 ---
+        let scene, camera, renderer, particles;
+        const PARTICLE_COUNT = 300000; // 粒子数量，非常密集
+        const NAME_TO_DISPLAY = "Xingru Chen";
+        const TEXT_SIZE = 100; // 文字在 3D 空间中的大致宽度/高度比例
+
+        // 粒子状态存储
+        let nameTargetPositions = []; // 名字形状的目标位置 (x, y, z)
+        let currentPositions;         // 粒子当前的 (x, y, z) 位置 (BufferAttribute)
+        let originalRandomPositions = []; // 爆炸效果的初始随机位置
+        let particleData = [];        // 存储每个粒子的速度和原始随机偏移
+
+        // 交互状态
+        let mouse = new THREE.Vector2(); // 鼠标在屏幕上的归一化坐标
+        let raycaster = new THREE.Raycaster();
+        let mouse3D = new THREE.Vector3(); // 鼠标在 3D 空间中的位置
+        let isExploding = false;
+        let explosionStartTime = 0;
+        const EXPLOSION_DURATION = 3.0; // 爆炸后聚拢的总时长 (秒)
+
+        // 初始化 Three.js 场景
+        function init() {
+            // 场景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            // 摄像机
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 15;
+            camera.lookAt(0, 0, 0);
+
+            // 渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 1. 生成粒子目标位置 (名字形状)
+            generateTextPositions();
+
+            // 2. 创建粒子系统
+            createParticles();
+
+            // 事件监听器
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('mousemove', onDocumentMouseMove, false);
+            document.addEventListener('mousedown', onDocumentMouseDown, false);
+
+            // 隐藏加载界面
+            const loadingOverlay = document.getElementById('loading-overlay');
+            loadingOverlay.style.opacity = '0';
+            setTimeout(() => { loadingOverlay.style.display = 'none'; }, 1500);
+
+            animate();
+        }
+
+        // --- 1. 文字生成与采样 ---
+        function generateTextPositions() {
+            const canvas = document.getElementById('textCanvas');
+            const ctx = canvas.getContext('2d');
+
+            // 确保高分辨率采样
+            const textScale = 20;
+            const textWidth = NAME_TO_DISPLAY.length * 60 * textScale / 10;
+            const textHeight = 100 * textScale / 10;
+
+            canvas.width = textWidth;
+            canvas.height = textHeight;
+
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.font = `${10 * textScale}px 'Inter', sans-serif`;
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(NAME_TO_DISPLAY, canvas.width / 2, canvas.height / 2);
+
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            let pixelCoordinates = [];
+
+            // 提取所有文字像素的坐标
+            for (let y = 0; y < canvas.height; y++) {
+                for (let x = 0; x < canvas.width; x++) {
+                    const alphaIndex = (y * canvas.width + x) * 4 + 3;
+                    // 如果像素不透明 (是文字的一部分)
+                    if (data[alphaIndex] > 0) {
+                        // 将像素坐标归一化到 Three.js 坐标系
+                        const normalizedX = (x - canvas.width / 2) / textScale;
+                        const normalizedY = (canvas.height / 2 - y) / textScale; // Y轴反转
+                        pixelCoordinates.push({ x: normalizedX, y: normalizedY });
+                    }
+                }
+            }
+
+            // 从像素中采样 PARTICLE_COUNT 个点
+            const totalPixels = pixelCoordinates.length;
+            const step = Math.max(1, Math.floor(totalPixels / PARTICLE_COUNT));
+
+            nameTargetPositions = [];
+            originalRandomPositions = [];
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                let index = i * step % totalPixels;
+                const coord = pixelCoordinates[index];
+
+                // 目标位置 (名字形状)
+                nameTargetPositions.push(coord.x, coord.y, (Math.random() - 0.5) * 0.5); // 增加少量 Z 轴厚度
+
+                // 初始随机位置 (用于爆炸的起始点)
+                const randomX = (Math.random() - 0.5) * TEXT_SIZE * 0.5;
+                const randomY = (Math.random() - 0.5) * TEXT_SIZE * 0.5;
+                const randomZ = (Math.random() - 0.5) * TEXT_SIZE * 0.5;
+                originalRandomPositions.push(randomX, randomY, randomZ);
+
+                // 粒子数据 (初始速度和随机偏移)
+                particleData.push({
+                    vx: 0,
+                    vy: 0,
+                    vz: 0,
+                    randomFactor: Math.random() // 爆炸聚拢时的随机延迟
+                });
+            }
+        }
+
+        // --- 2. 创建粒子系统 ---
+        function createParticles() {
+            const geometry = new THREE.BufferGeometry();
+
+            // 使用名字的目标位置作为初始位置
+            currentPositions = new Float32Array(nameTargetPositions);
+            geometry.setAttribute('position', new THREE.BufferAttribute(currentPositions, 3));
+
+            // 颜色属性 (统一颜色，但使用顶点颜色以启用 PointsMaterial 的 AdditiveBlending)
+            const colors = new Float32Array(PARTICLE_COUNT * 3);
+            const particleColor = new THREE.Color(0x00FFFF); // 青色/亮蓝色
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                colors[i * 3 + 0] = particleColor.r;
+                colors[i * 3 + 1] = particleColor.g;
+                colors[i * 3 + 2] = particleColor.b;
+            }
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            // 材质
+            const material = new THREE.PointsMaterial({
+                size: 0.1, // 粒子大小
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                opacity: 0.9,
+                depthWrite: false // 提高性能
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        // --- 3. 交互事件处理 ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onDocumentMouseMove(event) {
+            // 更新归一化鼠标坐标
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // 将鼠标坐标转换为 3D 空间中的一个点 (位于 z=0 平面附近)
+            raycaster.setFromCamera(mouse, camera);
+            // 假设目标平面在 z=0 处
+            const targetPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+            raycaster.ray.intersectPlane(targetPlane, mouse3D);
+        }
+
+        function onDocumentMouseDown(event) {
+            if (event.button === 0) { // 鼠标左键
+                explodeAndRecluster();
+            }
+        }
+
+        function explodeAndRecluster() {
+            if (isExploding) return;
+
+            isExploding = true;
+            explosionStartTime = performance.now() / 1000;
+
+            // 1. 设置粒子速度，向外爆炸
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                const targetX = nameTargetPositions[i3];
+                const targetY = nameTargetPositions[i3 + 1];
+                const targetZ = nameTargetPositions[i3 + 2];
+
+                // 计算从中心到名字形状的向量
+                const dirX = targetX;
+                const dirY = targetY;
+                const dirZ = targetZ;
+
+                const len = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+                const strength = 10 + Math.random() * 20; // 爆炸强度
+
+                particleData[i].vx = dirX / len * strength * (1 + Math.random());
+                particleData[i].vy = dirY / len * strength * (1 + Math.random());
+                particleData[i].vz = dirZ / len * strength * (1 + Math.random());
+            }
+        }
+
+        // --- 4. 动画和渲染循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now() / 1000;
+            const positions = currentPositions;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                const pData = particleData[i];
+
+                let targetX, targetY, targetZ;
+                let currentX = positions[i3];
+                let currentY = positions[i3 + 1];
+                let currentZ = positions[i3 + 2];
+
+                // 默认目标是名字形状
+                targetX = nameTargetPositions[i3];
+                targetY = nameTargetPositions[i3 + 1];
+                targetZ = nameTargetPositions[i3 + 2];
+
+
+                // --- 爆炸/聚拢逻辑 ---
+                if (isExploding) {
+                    const elapsed = time - explosionStartTime;
+                    const progress = Math.min(1, elapsed / EXPLOSION_DURATION);
+
+                    // 1. 爆炸阶段 (前 10% 的时间)
+                    if (progress < 0.1) {
+                        // 粒子根据速度继续飞散
+                        currentX += pData.vx * 0.01;
+                        currentY += pData.vy * 0.01;
+                        currentZ += pData.vz * 0.01;
+
+                        // 模拟空气阻力或衰减
+                        pData.vx *= 0.98;
+                        pData.vy *= 0.98;
+                        pData.vz *= 0.98;
+
+                        // 目标位置暂时设置为当前随机位置
+                        targetX = currentX;
+                        targetY = currentY;
+                        targetZ = currentZ;
+
+                    } else {
+                        // 2. 聚拢阶段 (后 90% 的时间)
+                        const reclusterProgress = (progress - 0.1) / 0.9;
+                        const factor = 0.05 + Math.pow(reclusterProgress, 3) * 0.2; // 缓动函数，开始慢，后来快
+
+                        // 从当前位置向名字目标位置移动
+                        currentX += (nameTargetPositions[i3] - currentX) * factor;
+                        currentY += (nameTargetPositions[i3 + 1] - currentY) * factor;
+                        currentZ += (nameTargetPositions[i3 + 2] - currentZ) * factor;
+
+                        // 接近目标后停止
+                        if (progress >= 1) {
+                            isExploding = false;
+                        }
+                    }
+
+                } else {
+                    // --- 鼠标涟漪 (水面消散) 逻辑 ---
+                    // 1. 计算粒子到鼠标 3D 位置的向量
+                    const dx = currentX - mouse3D.x;
+                    const dy = currentY - mouse3D.y;
+                    const dz = currentZ - mouse3D.z;
+                    const distSq = dx * dx + dy * dy + dz * dz;
+
+                    const radius = 5.0; // 影响范围
+                    const strength = 0.5; // 推开强度
+
+                    if (distSq < radius * radius) {
+                        const dist = Math.sqrt(distSq);
+                        // 强度与距离成反比
+                        const f = strength * (1 - dist / radius);
+
+                        // 沿着径向推开
+                        const pushX = dx * f / dist;
+                        const pushY = dy * f / dist;
+                        const pushZ = dz * f / dist * 0.1; // Z轴推力小一点
+
+                        currentX += pushX;
+                        currentY += pushY;
+                        currentZ += pushZ;
+                    }
+
+                    // 2. 粒子自动归位 (向名字形状目标移动)
+                    // 缓动系数，确保平滑
+                    const ease = 0.1;
+
+                    currentX += (targetX - currentX) * ease;
+                    currentY += (targetY - currentY) * ease;
+                    currentZ += (targetZ - currentZ) * ease;
+                }
+
+
+                // 更新位置
+                positions[i3] = currentX;
+                positions[i3 + 1] = currentY;
+                positions[i3 + 2] = currentZ;
+            }
+
+            // 通知 Three.js 几何体的属性已更新
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            renderer.render(scene, camera);
+        }
+
+        // 在窗口加载完成后启动
+        window.onload = init;
+    </script>
 </body>
 </html>
